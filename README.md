@@ -23,6 +23,8 @@ Requires Emacs 28.1+. Zero external dependencies. Uses ripgrep when available, f
 - Evil compatibility (emacs state)
 - Transient command dispatch (Emacs 29+ or `transient` package)
 
+![screenshot](screenshot.png "screenshot")
+
 ## Installation
 
 ### use-package with a Git URL
@@ -105,7 +107,7 @@ Clone the repository and add it to your `load-path`:
 (setq todo-explorer-keywords
       '("FIXME" "BUG" "TODO" "HACK" "NOTE" "XXX" "REVIEW" "OPTIMIZE"))
 
-;; Inherit keyword faces from hl-todo when available (default t)
+;; Inherit keyword faces from hl-todo when available (default nil)
 (setq todo-explorer-use-hl-todo-keywords t)
 
 ;; Exclude patterns (directories end with /)
