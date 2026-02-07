@@ -31,7 +31,7 @@ Requires Emacs 28.1+. Zero external dependencies. Uses ripgrep when available, f
 
 ```elisp
 (use-package todo-explorer
-  :vc (:url "https://gitea.local/cbs/emacs-todo-explorer" :branch "main")
+  :vc (:url "https://github.com/chrbirks/emacs-todo-explorer" :branch "main")
   :bind ("C-c t" . todo-explorer))
 ```
 
@@ -39,7 +39,7 @@ Requires Emacs 28.1+. Zero external dependencies. Uses ripgrep when available, f
 
 ```elisp
 (use-package todo-explorer
-  :straight (:host nil :repo "https://gitea.local/cbs/emacs-todo-explorer" :branch "main")
+  :straight (:host nil :repo "https://github.com/chrbirks/emacs-todo-explorer" :branch "main")
   :bind ("C-c t" . todo-explorer))
 ```
 
@@ -47,7 +47,7 @@ Requires Emacs 28.1+. Zero external dependencies. Uses ripgrep when available, f
 
 ```elisp
 (use-package todo-explorer
-  :ensure (:host nil :repo "https://gitea.local/cbs/emacs-todo-explorer" :branch "main")
+  :ensure (:host nil :repo "https://github.com/chrbirks/emacs-todo-explorer" :branch "main")
   :bind ("C-c t" . todo-explorer))
 ```
 
