@@ -4,7 +4,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: convenience tools
-;; URL: TODO
+;; URL: https://github.com/chrbirks/emacs-todo-explorer
 
 ;;; Commentary:
 
@@ -31,8 +31,17 @@
 ;;   f w     - filter: by author (regexp, requires blame)
 ;;   F       - toggle follow mode (auto-peek)
 ;;   B       - toggle git blame (author + age columns)
+;;   C       - cycle context method (auto/add-log/treesit)
+;;   TAB     - expand/collapse context lines for item at point
+;;   S-TAB   - expand/collapse all context lines
+;;   i       - ignore item at point (persistent)
+;;   I f     - ignore file of item at point
+;;   I d     - ignore directory (with completion)
+;;   I l     - manage ignore list
+;;   I c     - clear all ignores
 ;;   g     - refresh (rescan)
 ;;   q     - quit
+;;   ?     - help / command dispatch
 
 ;;; Code:
 
@@ -134,6 +143,11 @@ Requires git.  Silently skipped if the project is not a git repository."
                  (const :tag "add-log-current-defun" add-log)
                  (const :tag "Tree-sitter (Emacs 29+)" treesit)))
 
+(defcustom todo-explorer-ignore-directory
+  (locate-user-emacs-file "todo-explorer")
+  "Directory for storing per-project ignore list files."
+  :type 'directory)
+
 ;;;; Faces
 
 (defface todo-explorer-face-fixme
@@ -201,7 +215,23 @@ Requires git.  Silently skipped if the project is not a git repository."
   author
   date)
 
+(cl-defstruct (todo-explorer-ignore-entry
+               (:constructor todo-explorer-ignore-entry-create)
+               (:copier nil))
+  "An entry in the persistent ignore list."
+  file
+  keyword
+  text
+  line)
+
 ;;;; Internal Variables
+
+(defvar todo-explorer--ignore-data (make-hash-table :test #'equal)
+  "Global cache: project-root → ignore plist.")
+
+(defvar-local todo-explorer--ignore-list nil
+  "Buffer-local reference to current project's ignore data.
+A plist with keys :items, :files, :directories.")
 
 (defvar-local todo-explorer--items nil
   "Full list of scanned items.")
@@ -279,6 +309,83 @@ When nil, uses `todo-explorer-context-method'.")
   "Return project root via `project.el', or nil."
   (when-let ((project (project-current)))
     (project-root project)))
+
+;;;; Ignore List Persistence
+
+(defun todo-explorer--ignore-file-path (root)
+  "Return the ignore file path for project ROOT."
+  (expand-file-name (concat (md5 (expand-file-name root)) ".eld")
+                    todo-explorer-ignore-directory))
+
+(defun todo-explorer--ignore-entry-to-plist (entry)
+  "Convert an `todo-explorer-ignore-entry' ENTRY to a plist."
+  (list :file (todo-explorer-ignore-entry-file entry)
+        :keyword (todo-explorer-ignore-entry-keyword entry)
+        :text (todo-explorer-ignore-entry-text entry)
+        :line (todo-explorer-ignore-entry-line entry)))
+
+(defun todo-explorer--plist-to-ignore-entry (plist)
+  "Convert a PLIST to a `todo-explorer-ignore-entry'."
+  (todo-explorer-ignore-entry-create
+   :file (plist-get plist :file)
+   :keyword (plist-get plist :keyword)
+   :text (plist-get plist :text)
+   :line (plist-get plist :line)))
+
+(defun todo-explorer--load-ignore-list (root)
+  "Load the ignore list for project ROOT from disk.
+Returns a plist (:items :files :directories).
+Corrupt or missing files produce an empty list, never an error."
+  (let ((file (todo-explorer--ignore-file-path root)))
+    (if (file-readable-p file)
+        (condition-case err
+            (with-temp-buffer
+              (insert-file-contents file)
+              (let ((data (read (current-buffer))))
+                (list :items (mapcar #'todo-explorer--plist-to-ignore-entry
+                                     (plist-get data :items))
+                      :files (plist-get data :files)
+                      :directories (plist-get data :directories))))
+          (error
+           (message "todo-explorer: corrupt ignore file %s: %s" file err)
+           (list :items nil :files nil :directories nil)))
+      (list :items nil :files nil :directories nil))))
+
+(defun todo-explorer--save-ignore-list (root data)
+  "Save ignore DATA plist for project ROOT to disk.
+Creates the storage directory if needed.  Updates the global cache."
+  (let ((file (todo-explorer--ignore-file-path root))
+        (dir todo-explorer-ignore-directory))
+    (unless (file-directory-p dir)
+      (make-directory dir t))
+    (let ((serialized (list :project (expand-file-name root)
+                            :items (mapcar #'todo-explorer--ignore-entry-to-plist
+                                           (plist-get data :items))
+                            :files (plist-get data :files)
+                            :directories (plist-get data :directories))))
+      (with-temp-file file
+        (pp serialized (current-buffer)))))
+  (puthash (expand-file-name root) data todo-explorer--ignore-data))
+
+(defun todo-explorer--ensure-ignore-list ()
+  "Load the ignore list for the current project, caching as needed.
+Sets the buffer-local `todo-explorer--ignore-list'."
+  (when todo-explorer--project-root
+    (let* ((root (expand-file-name todo-explorer--project-root))
+           (cached (gethash root todo-explorer--ignore-data)))
+      (setq todo-explorer--ignore-list
+            (or cached
+                (let ((data (todo-explorer--load-ignore-list root)))
+                  (puthash root data todo-explorer--ignore-data)
+                  data))))))
+
+(defun todo-explorer--ignore-count ()
+  "Return the total number of ignore entries in the current ignore list."
+  (if todo-explorer--ignore-list
+      (+ (length (plist-get todo-explorer--ignore-list :items))
+         (length (plist-get todo-explorer--ignore-list :files))
+         (length (plist-get todo-explorer--ignore-list :directories)))
+    0))
 
 ;;;; Keywords & Faces
 
@@ -766,11 +873,37 @@ ROOT is the project root.  GENERATION prevents stale callbacks."
                                      (todo-explorer-item-file b))
                           (< da db)))))))))
 
+;;;; Ignore Matching
+
+(defun todo-explorer--item-ignored-p (item)
+  "Return non-nil if ITEM should be hidden by the ignore list."
+  (when todo-explorer--ignore-list
+    (let ((rel-file (file-relative-name (todo-explorer-item-file item)
+                                        todo-explorer--project-root)))
+      (or
+       ;; File match
+       (member rel-file (plist-get todo-explorer--ignore-list :files))
+       ;; Directory match
+       (cl-some (lambda (dir)
+                  (string-prefix-p dir rel-file))
+                (plist-get todo-explorer--ignore-list :directories))
+       ;; Item match: (file keyword text)
+       (cl-some (lambda (entry)
+                  (and (string= rel-file
+                                (todo-explorer-ignore-entry-file entry))
+                       (string= (todo-explorer-item-keyword item)
+                                (todo-explorer-ignore-entry-keyword entry))
+                       (string= (todo-explorer-item-text item)
+                                (todo-explorer-ignore-entry-text entry))))
+                (plist-get todo-explorer--ignore-list :items))))))
+
 ;;;; Filtering
 
 (defun todo-explorer--apply-filter-and-sort ()
   "Apply current filter and sort, then refresh the display."
   (let ((items todo-explorer--items))
+    (when todo-explorer--ignore-list
+      (setq items (cl-remove-if #'todo-explorer--item-ignored-p items)))
     (when todo-explorer--active-filter
       (setq items (cl-remove-if-not
                    (lambda (item)
@@ -935,7 +1068,9 @@ Column headers are managed by `tabulated-list-init-header'."
                        (format " ctx:%s" todo-explorer--context-filter) "")
                    (if todo-explorer--author-filter
                        (format " @%s" todo-explorer--author-filter) "")
-                   (if todo-explorer--blame-active " blame" ""))))
+                   (if todo-explorer--blame-active " blame" "")
+                   (let ((ign (todo-explorer--ignore-count)))
+                     (if (> ign 0) (format " ign:%d" ign) "")))))
     (setq mode-line-process
           (concat (format " %d%s in %d files"
                           n-shown
@@ -1355,6 +1490,17 @@ Skips treesit if tree-sitter is not available."
       (todo-explorer--apply-filter-and-sort))
     (message "Context method: %s" next)))
 
+;;;; Ignore Keymap
+
+(defvar todo-explorer-ignore-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "f") #'todo-explorer-ignore-item-file)
+    (define-key map (kbd "d") #'todo-explorer-ignore-item-directory)
+    (define-key map (kbd "l") #'todo-explorer-manage-ignores)
+    (define-key map (kbd "c") #'todo-explorer-clear-ignores)
+    map)
+  "Keymap for ignore commands under the `I' prefix.")
+
 ;;;; Filter Keymap
 
 (defvar todo-explorer-filter-map
@@ -1431,6 +1577,8 @@ Column widths scale proportionally to the window body width."
     (define-key map (kbd "TAB")       #'todo-explorer-toggle-context)
     (define-key map (kbd "<backtab>") #'todo-explorer-toggle-context-all)
     (define-key map (kbd "?")         #'todo-explorer-help)
+    (define-key map (kbd "i")   #'todo-explorer-ignore-item)
+    (define-key map (kbd "I")   todo-explorer-ignore-map)
     map)
   "Keymap for `todo-explorer-mode'.")
 
@@ -1494,6 +1642,7 @@ Results are displayed in a dedicated interactive buffer."
           (todo-explorer-mode))
         (setq todo-explorer--project-root root)
         (setq todo-explorer--scan-target root)
+        (todo-explorer--ensure-ignore-list)
         (setq next-error-last-buffer buf)
         (todo-explorer--scan root buf))
       (todo-explorer--display-buffer buf)
@@ -1516,6 +1665,7 @@ Results are displayed in a dedicated interactive buffer."
         (todo-explorer-mode))
       (setq todo-explorer--project-root root)
       (setq todo-explorer--scan-target file)
+      (todo-explorer--ensure-ignore-list)
       (setq next-error-last-buffer buf)
       (todo-explorer--scan file buf))
     (todo-explorer--display-buffer buf)
@@ -1526,7 +1676,258 @@ Results are displayed in a dedicated interactive buffer."
   (interactive)
   (unless (derived-mode-p 'todo-explorer-mode)
     (user-error "Not in a todo-explorer buffer"))
+  (when todo-explorer--project-root
+    (remhash (expand-file-name todo-explorer--project-root)
+             todo-explorer--ignore-data)
+    (todo-explorer--ensure-ignore-list))
   (todo-explorer--scan todo-explorer--scan-target (current-buffer)))
+
+;;;; Ignore Commands
+
+(defun todo-explorer--require-project-root ()
+  "Return the project root or signal a `user-error'."
+  (or todo-explorer--project-root
+      (user-error "No project root set")))
+
+(defun todo-explorer-ignore-item ()
+  "Add the item at point to the persistent ignore list."
+  (interactive)
+  (let ((root (todo-explorer--require-project-root))
+        (item (todo-explorer--item-at-point)))
+    (unless item
+      (user-error "No item at point"))
+    (todo-explorer--ensure-ignore-list)
+    (let* ((rel-file (file-relative-name (todo-explorer-item-file item) root))
+           (keyword (todo-explorer-item-keyword item))
+           (text (todo-explorer-item-text item))
+           (existing (plist-get todo-explorer--ignore-list :items))
+           (already (cl-some (lambda (e)
+                               (and (string= (todo-explorer-ignore-entry-file e) rel-file)
+                                    (string= (todo-explorer-ignore-entry-keyword e) keyword)
+                                    (string= (todo-explorer-ignore-entry-text e) text)))
+                             existing)))
+      (if already
+          (message "Already ignored")
+        (let ((entry (todo-explorer-ignore-entry-create
+                      :file rel-file
+                      :keyword keyword
+                      :text text
+                      :line (todo-explorer-item-line item))))
+          (plist-put todo-explorer--ignore-list :items
+                     (append existing (list entry)))
+          (todo-explorer--save-ignore-list root todo-explorer--ignore-list)
+          (todo-explorer--apply-filter-and-sort)
+          (message "Ignored: %s %s" keyword text))))))
+
+(defun todo-explorer-ignore-item-file ()
+  "Add the file of the item at point to the persistent ignore list."
+  (interactive)
+  (let ((root (todo-explorer--require-project-root))
+        (item (todo-explorer--item-at-point)))
+    (unless item
+      (user-error "No item at point"))
+    (let ((rel-file (file-relative-name (todo-explorer-item-file item) root)))
+      (when (y-or-n-p (format "Ignore all items in %s? " rel-file))
+        (todo-explorer--ensure-ignore-list)
+        (let ((existing (plist-get todo-explorer--ignore-list :files)))
+          (if (member rel-file existing)
+              (message "File already ignored: %s" rel-file)
+            (plist-put todo-explorer--ignore-list :files
+                       (append existing (list rel-file)))
+            (todo-explorer--save-ignore-list root todo-explorer--ignore-list)
+            (todo-explorer--apply-filter-and-sort)
+            (message "Ignored file: %s" rel-file)))))))
+
+(defun todo-explorer-ignore-item-directory ()
+  "Add a directory to the persistent ignore list.
+Prompts with completion from directories containing scanned items."
+  (interactive)
+  (let ((root (todo-explorer--require-project-root)))
+    (todo-explorer--ensure-ignore-list)
+    (let* ((dirs (delete-dups
+                  (mapcar (lambda (item)
+                            (file-name-directory
+                             (file-relative-name
+                              (todo-explorer-item-file item) root)))
+                          todo-explorer--items)))
+           (dir (completing-read "Ignore directory: " dirs nil nil)))
+      (when (string-empty-p dir)
+        (user-error "No directory specified"))
+      (unless (string-suffix-p "/" dir)
+        (setq dir (concat dir "/")))
+      (let ((existing (plist-get todo-explorer--ignore-list :directories)))
+        (if (member dir existing)
+            (message "Directory already ignored: %s" dir)
+          (plist-put todo-explorer--ignore-list :directories
+                     (append existing (list dir)))
+          (todo-explorer--save-ignore-list root todo-explorer--ignore-list)
+          (todo-explorer--apply-filter-and-sort)
+          (message "Ignored directory: %s" dir))))))
+
+(defun todo-explorer-clear-ignores ()
+  "Clear all ignore entries for the current project."
+  (interactive)
+  (let ((root (todo-explorer--require-project-root)))
+    (when (yes-or-no-p "Clear all ignore entries for this project? ")
+      (let ((empty (list :items nil :files nil :directories nil)))
+        (setq todo-explorer--ignore-list empty)
+        (todo-explorer--save-ignore-list root empty)
+        (todo-explorer--apply-filter-and-sort)
+        (message "All ignores cleared")))))
+
+;;;; Ignore Management Buffer
+
+(defvar todo-explorer-ignore-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "d") #'todo-explorer-ignore-mark-delete)
+    (define-key map (kbd "u") #'todo-explorer-ignore-unmark)
+    (define-key map (kbd "x") #'todo-explorer-ignore-execute)
+    (define-key map (kbd "RET") #'todo-explorer-ignore-visit)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `todo-explorer-ignore-mode'.")
+
+(define-derived-mode todo-explorer-ignore-mode tabulated-list-mode
+  "Todo-Ignore"
+  "Major mode for managing todo-explorer ignore entries.
+
+\\{todo-explorer-ignore-mode-map}"
+  (setq tabulated-list-format
+        (vector '(" " 1 t)
+                '("Type" 6 t)
+                '("Target" 40 t)
+                '("Details" 0 nil)))
+  (setq tabulated-list-padding 1)
+  (tabulated-list-init-header))
+
+(defvar-local todo-explorer-ignore--project-root nil
+  "Project root for the ignore management buffer.")
+
+(defvar-local todo-explorer-ignore--source-buffer nil
+  "The todo-explorer buffer that spawned the management buffer.")
+
+(defun todo-explorer-manage-ignores ()
+  "Open a management buffer to view and remove ignore entries."
+  (interactive)
+  (let ((root (todo-explorer--require-project-root))
+        (source-buf (current-buffer)))
+    (todo-explorer--ensure-ignore-list)
+    (let* ((project-name (file-name-nondirectory
+                           (directory-file-name root)))
+           (buf-name (format "*todo-explorer-ignores: %s*" project-name))
+           (buf (get-buffer-create buf-name)))
+      (with-current-buffer buf
+        (todo-explorer-ignore-mode)
+        (setq todo-explorer-ignore--project-root root)
+        (setq todo-explorer-ignore--source-buffer source-buf)
+        (todo-explorer--ignore-refresh-entries root))
+      (pop-to-buffer buf))))
+
+(defun todo-explorer--ignore-refresh-entries (root)
+  "Populate the ignore management buffer with entries for ROOT."
+  (let ((data (or (gethash (expand-file-name root) todo-explorer--ignore-data)
+                  (todo-explorer--load-ignore-list root)))
+        (entries nil))
+    (dolist (entry (plist-get data :items))
+      (let* ((file (todo-explorer-ignore-entry-file entry))
+             (kw (todo-explorer-ignore-entry-keyword entry))
+             (text (todo-explorer-ignore-entry-text entry)))
+        (push (list (cons 'item entry)
+                    (vector " " "Item" file
+                            (format "%s: %s" kw text)))
+              entries)))
+    (dolist (file (plist-get data :files))
+      (push (list (cons 'file file)
+                  (vector " " "File" file ""))
+            entries))
+    (dolist (dir (plist-get data :directories))
+      (push (list (cons 'dir dir)
+                  (vector " " "Dir" dir ""))
+            entries))
+    (setq tabulated-list-entries (nreverse entries))
+    (tabulated-list-print t)))
+
+(defun todo-explorer-ignore-mark-delete ()
+  "Mark the entry at point for deletion."
+  (interactive)
+  (let ((entry (tabulated-list-get-entry)))
+    (when entry
+      (tabulated-list-put-tag "D" t))))
+
+(defun todo-explorer-ignore-unmark ()
+  "Unmark the entry at point."
+  (interactive)
+  (let ((entry (tabulated-list-get-entry)))
+    (when entry
+      (tabulated-list-put-tag " " t))))
+
+(defun todo-explorer-ignore-execute ()
+  "Remove all entries marked with `D' and save."
+  (interactive)
+  (let ((root todo-explorer-ignore--project-root)
+        (to-remove nil))
+    (unless root
+      (user-error "No project root"))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (eq (char-after) ?D)
+          (let ((id (tabulated-list-get-id)))
+            (when id (push id to-remove))))
+        (forward-line 1)))
+    (when (and to-remove
+               (y-or-n-p (format "Remove %d ignore entries? "
+                                 (length to-remove))))
+      (let ((data (or (gethash (expand-file-name root)
+                               todo-explorer--ignore-data)
+                      (todo-explorer--load-ignore-list root))))
+        (dolist (entry to-remove)
+          (pcase (car entry)
+            ('item
+             (let ((e (cdr entry)))
+               (plist-put data :items
+                          (cl-remove-if
+                           (lambda (x)
+                             (and (string= (todo-explorer-ignore-entry-file x)
+                                           (todo-explorer-ignore-entry-file e))
+                                  (string= (todo-explorer-ignore-entry-keyword x)
+                                           (todo-explorer-ignore-entry-keyword e))
+                                  (string= (todo-explorer-ignore-entry-text x)
+                                           (todo-explorer-ignore-entry-text e))))
+                           (plist-get data :items)))))
+            ('file
+             (plist-put data :files
+                        (delete (cdr entry) (plist-get data :files))))
+            ('dir
+             (plist-put data :directories
+                        (delete (cdr entry) (plist-get data :directories))))))
+        (todo-explorer--save-ignore-list root data)
+        (todo-explorer--ignore-refresh-entries root)
+        ;; Refresh source buffer if alive
+        (when (and todo-explorer-ignore--source-buffer
+                   (buffer-live-p todo-explorer-ignore--source-buffer))
+          (with-current-buffer todo-explorer-ignore--source-buffer
+            (setq todo-explorer--ignore-list data)
+            (todo-explorer--apply-filter-and-sort)))
+        (message "Removed %d ignore entries" (length to-remove))))))
+
+(defun todo-explorer-ignore-visit ()
+  "Visit the file of the ignore entry at point."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (unless id
+      (user-error "No entry at point"))
+    (let* ((root todo-explorer-ignore--project-root)
+           (file (pcase (car id)
+                   ('item (todo-explorer-ignore-entry-file (cdr id)))
+                   ('file (cdr id))
+                   ('dir (cdr id)))))
+      (when file
+        (let ((abs-file (expand-file-name file root)))
+          (if (file-exists-p abs-file)
+              (find-file-other-window abs-file)
+            (message "File does not exist: %s" abs-file)))))))
 
 ;;;; Transient Dispatch
 
@@ -1564,7 +1965,13 @@ Results are displayed in a dedicated interactive buffer."
         ("C" "Context method" todo-explorer-toggle-context-method)
         ("g" "Refresh" todo-explorer-refresh)
         ("?" "Close menu" transient-quit-one)
-        ("q" "Quit" todo-explorer-quit :transient nil)]])
+        ("q" "Quit" todo-explorer-quit :transient nil)]
+       ["Ignore"
+        ("i" "Ignore item" todo-explorer-ignore-item)
+        ("I f" "Ignore file" todo-explorer-ignore-item-file)
+        ("I d" "Ignore directory" todo-explorer-ignore-item-directory)
+        ("I l" "Manage ignores" todo-explorer-manage-ignores)
+        ("I c" "Clear ignores" todo-explorer-clear-ignores)]])
    t))
 
 (defun todo-explorer-help ()
@@ -1603,7 +2010,13 @@ Uses `transient' dispatch when available, otherwise a help buffer."
       (princ "  B         Toggle git blame (author + age columns)\n")
       (princ "  C         Cycle context method (auto → add-log → treesit)\n")
       (princ "  g         Refresh (rescan)\n")
-      (princ "  q         Quit and restore window layout\n"))))
+      (princ "  q         Quit and restore window layout\n")
+      (princ "\nIgnore\n")
+      (princ "  i         Ignore item at point\n")
+      (princ "  I f       Ignore file of item at point\n")
+      (princ "  I d       Ignore directory (with completion)\n")
+      (princ "  I l       Manage ignore list\n")
+      (princ "  I c       Clear all ignores\n"))))
 
 (defun todo-explorer--maybe-show-dispatch ()
   "Show the dispatch menu if configured and transient is available."

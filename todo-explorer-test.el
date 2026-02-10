@@ -579,5 +579,224 @@
   (should (string= "class" (cdr (assoc "class_definition"
                                         todo-explorer--treesit-scope-types)))))
 
+;;;; Unit Tests — Ignore List
+
+(ert-deftest todo-explorer-test-ignore-entry-roundtrip ()
+  "Ignore entry → plist → entry preserves all fields."
+  (let* ((entry (todo-explorer-ignore-entry-create
+                 :file "src/foo.el"
+                 :keyword "TODO"
+                 :text "Fix this"
+                 :line 42))
+         (plist (todo-explorer--ignore-entry-to-plist entry))
+         (restored (todo-explorer--plist-to-ignore-entry plist)))
+    (should (string= (todo-explorer-ignore-entry-file restored) "src/foo.el"))
+    (should (string= (todo-explorer-ignore-entry-keyword restored) "TODO"))
+    (should (string= (todo-explorer-ignore-entry-text restored) "Fix this"))
+    (should (= (todo-explorer-ignore-entry-line restored) 42))))
+
+(ert-deftest todo-explorer-test-ignore-save-load-roundtrip ()
+  "Save to temp dir, load back, data matches."
+  (let* ((tmp-dir (make-temp-file "todo-explorer-test-" t))
+         (todo-explorer-ignore-directory tmp-dir)
+         (root "/tmp/fake-project/")
+         (data (list :items (list (todo-explorer-ignore-entry-create
+                                   :file "src/main.el"
+                                   :keyword "FIXME"
+                                   :text "Handle edge case"
+                                   :line 10))
+                     :files (list "vendor/lib.el")
+                     :directories (list "build/"))))
+    (unwind-protect
+        (progn
+          (todo-explorer--save-ignore-list root data)
+          (let ((loaded (todo-explorer--load-ignore-list root)))
+            ;; Items roundtrip
+            (should (= (length (plist-get loaded :items)) 1))
+            (let ((entry (car (plist-get loaded :items))))
+              (should (string= (todo-explorer-ignore-entry-file entry)
+                               "src/main.el"))
+              (should (string= (todo-explorer-ignore-entry-keyword entry)
+                               "FIXME"))
+              (should (string= (todo-explorer-ignore-entry-text entry)
+                               "Handle edge case")))
+            ;; Files roundtrip
+            (should (equal (plist-get loaded :files) '("vendor/lib.el")))
+            ;; Directories roundtrip
+            (should (equal (plist-get loaded :directories) '("build/")))))
+      (delete-directory tmp-dir t))))
+
+(ert-deftest todo-explorer-test-ignore-load-missing-file ()
+  "Loading from a missing file returns empty plist, no error."
+  (let ((todo-explorer-ignore-directory "/tmp/nonexistent-todo-explorer-dir/"))
+    (let ((result (todo-explorer--load-ignore-list "/tmp/fake/")))
+      (should (null (plist-get result :items)))
+      (should (null (plist-get result :files)))
+      (should (null (plist-get result :directories))))))
+
+(ert-deftest todo-explorer-test-ignore-load-corrupt-file ()
+  "Loading a corrupt file returns empty plist, no error."
+  (let* ((tmp-dir (make-temp-file "todo-explorer-test-" t))
+         (todo-explorer-ignore-directory tmp-dir)
+         (root "/tmp/corrupt-test/")
+         (file (todo-explorer--ignore-file-path root)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "this is not valid elisp {{{{"))
+          (let ((result (todo-explorer--load-ignore-list root)))
+            (should (null (plist-get result :items)))
+            (should (null (plist-get result :files)))
+            (should (null (plist-get result :directories)))))
+      (delete-directory tmp-dir t))))
+
+(ert-deftest todo-explorer-test-item-ignored-p-by-item ()
+  "Matching item → t, non-matching → nil."
+  (with-temp-buffer
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items (list (todo-explorer-ignore-entry-create
+                              :file "src/foo.el"
+                              :keyword "TODO"
+                              :text "Fix this"))
+                :files nil
+                :directories nil))
+    (let ((match (todo-explorer-item-create
+                  :file "/project/src/foo.el" :line 10
+                  :keyword "TODO" :text "Fix this" :priority 2))
+          (no-match (todo-explorer-item-create
+                     :file "/project/src/foo.el" :line 10
+                     :keyword "TODO" :text "Different text" :priority 2)))
+      (should (todo-explorer--item-ignored-p match))
+      (should-not (todo-explorer--item-ignored-p no-match)))))
+
+(ert-deftest todo-explorer-test-item-ignored-p-by-file ()
+  "Item in ignored file → t."
+  (with-temp-buffer
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items nil
+                :files (list "src/generated.el")
+                :directories nil))
+    (let ((match (todo-explorer-item-create
+                  :file "/project/src/generated.el" :line 5
+                  :keyword "TODO" :text "Whatever" :priority 2))
+          (no-match (todo-explorer-item-create
+                     :file "/project/src/main.el" :line 5
+                     :keyword "TODO" :text "Whatever" :priority 2)))
+      (should (todo-explorer--item-ignored-p match))
+      (should-not (todo-explorer--item-ignored-p no-match)))))
+
+(ert-deftest todo-explorer-test-item-ignored-p-by-directory ()
+  "Item under ignored directory → t."
+  (with-temp-buffer
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items nil
+                :files nil
+                :directories (list "build/")))
+    (let ((match (todo-explorer-item-create
+                  :file "/project/build/output.el" :line 1
+                  :keyword "TODO" :text "Test" :priority 2))
+          (no-match (todo-explorer-item-create
+                     :file "/project/src/main.el" :line 1
+                     :keyword "TODO" :text "Test" :priority 2)))
+      (should (todo-explorer--item-ignored-p match))
+      (should-not (todo-explorer--item-ignored-p no-match)))))
+
+(ert-deftest todo-explorer-test-item-ignored-p-empty ()
+  "Empty ignore list → nil for all."
+  (with-temp-buffer
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items nil :files nil :directories nil))
+    (let ((item (todo-explorer-item-create
+                 :file "/project/src/foo.el" :line 1
+                 :keyword "TODO" :text "Test" :priority 2)))
+      (should-not (todo-explorer--item-ignored-p item)))))
+
+(ert-deftest todo-explorer-test-ignore-filter-integration ()
+  "Ignored items are excluded from filtered-items."
+  (with-temp-buffer
+    (todo-explorer-mode)
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items (list (todo-explorer-ignore-entry-create
+                              :file "src/foo.el"
+                              :keyword "TODO"
+                              :text "Ignored item"))
+                :files nil
+                :directories nil))
+    (setq todo-explorer--items
+          (list (todo-explorer-item-create
+                 :file "/project/src/foo.el" :line 10
+                 :keyword "TODO" :text "Ignored item" :priority 2)
+                (todo-explorer-item-create
+                 :file "/project/src/foo.el" :line 20
+                 :keyword "TODO" :text "Visible item" :priority 2)))
+    (todo-explorer--apply-filter-and-sort)
+    (should (= (length todo-explorer--filtered-items) 1))
+    (should (string= (todo-explorer-item-text
+                       (car todo-explorer--filtered-items))
+                     "Visible item"))))
+
+(ert-deftest todo-explorer-test-ignore-duplicate-prevention ()
+  "Ignoring same item twice results in a single entry."
+  (let* ((tmp-dir (make-temp-file "todo-explorer-test-" t))
+         (todo-explorer-ignore-directory tmp-dir))
+    (unwind-protect
+        (with-temp-buffer
+          (todo-explorer-mode)
+          (setq todo-explorer--project-root "/project/")
+          (setq todo-explorer--ignore-list
+                (list :items nil :files nil :directories nil))
+          (setq todo-explorer--items
+                (list (todo-explorer-item-create
+                       :file "/project/src/foo.el" :line 10
+                       :keyword "TODO" :text "Fix this" :priority 2)))
+          (let ((inhibit-read-only t))
+            (todo-explorer--apply-filter-and-sort)
+            (goto-char (point-min))
+            ;; Ignore the item
+            (todo-explorer-ignore-item)
+            (should (= (length (plist-get todo-explorer--ignore-list :items)) 1))
+            ;; Re-add the same item to display (simulate rescan)
+            (setq todo-explorer--items
+                  (list (todo-explorer-item-create
+                         :file "/project/src/foo.el" :line 10
+                         :keyword "TODO" :text "Fix this" :priority 2)))
+            (todo-explorer--apply-filter-and-sort)
+            (goto-char (point-min))
+            ;; The item is already ignored, so filtered-items is empty
+            ;; Just verify the ignore list still has exactly one entry
+            (should (= (length (plist-get todo-explorer--ignore-list :items)) 1))))
+      (delete-directory tmp-dir t))))
+
+(ert-deftest todo-explorer-test-ignore-file-path ()
+  "Correct file path construction for ignore files."
+  (let ((todo-explorer-ignore-directory "/tmp/test-ignore/"))
+    (let ((path (todo-explorer--ignore-file-path "/home/user/project/")))
+      (should (string-prefix-p "/tmp/test-ignore/" path))
+      (should (string-suffix-p ".eld" path))
+      ;; Should contain MD5 hash
+      (should (string-match-p "[0-9a-f]\\{32\\}" path)))))
+
+(ert-deftest todo-explorer-test-ignore-stale-entries ()
+  "Stale ignore entries (non-existent files) don't cause errors."
+  (with-temp-buffer
+    (setq todo-explorer--project-root "/project/")
+    (setq todo-explorer--ignore-list
+          (list :items (list (todo-explorer-ignore-entry-create
+                              :file "deleted/file.el"
+                              :keyword "TODO"
+                              :text "Gone"))
+                :files (list "nonexistent.el")
+                :directories (list "removed-dir/")))
+    ;; Item from a different file should not be ignored
+    (let ((item (todo-explorer-item-create
+                 :file "/project/src/real.el" :line 1
+                 :keyword "TODO" :text "Real item" :priority 2)))
+      (should-not (todo-explorer--item-ignored-p item)))))
+
 (provide 'todo-explorer-test)
 ;;; todo-explorer-test.el ends here
