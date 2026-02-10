@@ -1425,9 +1425,9 @@ Column widths scale proportionally to the window body width."
     (define-key map (kbd "/")   #'todo-explorer-filter-text)
     (define-key map (kbd "g")   #'todo-explorer-refresh)
     (define-key map (kbd "q")   #'todo-explorer-quit)
-    (define-key map (kbd "TAB") #'todo-explorer-toggle-context)
-    (define-key map (kbd "S-TAB") #'todo-explorer-toggle-context-all)
-    (define-key map (kbd "?")   #'todo-explorer-help)
+    (define-key map (kbd "TAB")       #'todo-explorer-toggle-context)
+    (define-key map (kbd "<backtab>") #'todo-explorer-toggle-context-all)
+    (define-key map (kbd "?")         #'todo-explorer-help)
     map)
   "Keymap for `todo-explorer-mode'.")
 
@@ -1555,7 +1555,7 @@ Results are displayed in a dedicated interactive buffer."
         ("f a" "Show all" todo-explorer-filter-all)]
        ["Actions"
         ("TAB" "Expand/collapse" todo-explorer-toggle-context)
-        ("S-TAB" "Expand/collapse all" todo-explorer-toggle-context-all)
+        ("<backtab>" "Expand/collapse all" todo-explorer-toggle-context-all)
         ("F" "Follow mode" todo-explorer-toggle-follow)
         ("B" "Toggle blame" todo-explorer-toggle-blame)
         ("C" "Context method" todo-explorer-toggle-context-method)
