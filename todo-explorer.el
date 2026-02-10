@@ -525,6 +525,7 @@ Skips silently if git is unavailable or ROOT is not a git repository."
 (defun todo-explorer--rg-command (target)
   "Build rg command list to scan TARGET (directory or file)."
   (let ((cmd (list "rg" "--vimgrep" "--no-heading" "--color" "never"
+                   "--case-sensitive"
                    "-e" (todo-explorer--build-scanner-regexp))))
     (when (file-directory-p target)
       (dolist (pat todo-explorer-exclude-patterns)
@@ -570,7 +571,8 @@ Returns nil if LINE cannot be parsed."
                                          "\\|")
                               "\\)\\b"))
            keyword text)
-      (when (string-match kw-regexp context)
+      (when (let ((case-fold-search nil))
+              (string-match kw-regexp context))
         (setq keyword (match-string 1 context))
         (setq text (string-trim (substring context (match-end 0))))
         ;; Strip leading colon/dash from text
@@ -690,6 +692,7 @@ ROOT is the project root.  GENERATION prevents stale callbacks."
                       (buffer-substring-no-properties
                        (point-min) (min (point-max) (+ (point-min) 512))))
               (goto-char (point-min))
+              (let ((case-fold-search nil))
               (while (re-search-forward regexp nil t)
                 (let* ((keyword (match-string 1))
                        (line-num (line-number-at-pos (match-beginning 0)))
@@ -709,7 +712,7 @@ ROOT is the project root.  GENERATION prevents stale callbacks."
                          :keyword keyword
                          :text text-after
                          :priority (todo-explorer--keyword-priority keyword))
-                        items)))))))
+                        items))))))))
       (setq todo-explorer--items (nreverse items))
       (todo-explorer--resolve-contexts todo-explorer--items)
       (todo-explorer--resolve-blame todo-explorer--items
@@ -1625,21 +1628,22 @@ constituent in `emacs-lisp-mode')."
         entries)
     (save-excursion
       (goto-char (point-min))
-      (while (re-search-forward regexp nil t)
-        (let* ((keyword (match-string-no-properties 1))
-               (pos (match-beginning 0))
-               (text (string-trim
-                      (buffer-substring-no-properties
-                       (match-end 0) (line-end-position)))))
-          ;; Strip leading colon/dash
-          (when (string-match "\\`[: -]+" text)
-            (setq text (string-trim (substring text (match-end 0)))))
-          (let ((label (if (string-empty-p text)
-                           (format "%s (line %d)" keyword
-                                   (line-number-at-pos pos))
-                         (format "%s: %s" keyword
-                                 (truncate-string-to-width text 60)))))
-            (push (cons label (copy-marker pos)) entries)))))
+      (let ((case-fold-search nil))
+        (while (re-search-forward regexp nil t)
+          (let* ((keyword (match-string-no-properties 1))
+                 (pos (match-beginning 0))
+                 (text (string-trim
+                        (buffer-substring-no-properties
+                         (match-end 0) (line-end-position)))))
+            ;; Strip leading colon/dash
+            (when (string-match "\\`[: -]+" text)
+              (setq text (string-trim (substring text (match-end 0)))))
+            (let ((label (if (string-empty-p text)
+                             (format "%s (line %d)" keyword
+                                     (line-number-at-pos pos))
+                           (format "%s: %s" keyword
+                                   (truncate-string-to-width text 60)))))
+              (push (cons label (copy-marker pos)) entries))))))
     (nreverse entries)))
 
 (defun todo-explorer--imenu-create-index ()
