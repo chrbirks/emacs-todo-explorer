@@ -1599,6 +1599,17 @@ Column widths scale proportionally to the window body width."
     (set-display-table-slot dt 'truncation (make-glyph-code ?…))
     (setq buffer-display-table dt)))
 
+(defun todo-explorer--disable-line-numbers ()
+  "Disable `display-line-numbers-mode' in todo-explorer buffers.
+Overlays with `before-string' break line number display.
+Runs on `after-change-major-mode-hook' at depth 90, which is after
+`global-display-line-numbers-mode' (depth 0)."
+  (when (derived-mode-p 'todo-explorer-mode 'todo-explorer-ignore-mode)
+    (display-line-numbers-mode -1)))
+
+(add-hook 'after-change-major-mode-hook
+          #'todo-explorer--disable-line-numbers 90)
+
 ;;;; Buffer Display
 
 (defvar-local todo-explorer--saved-window-config nil
