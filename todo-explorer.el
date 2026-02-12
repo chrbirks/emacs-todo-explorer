@@ -988,34 +988,56 @@ ROOT is the project root.  GENERATION prevents stale callbacks."
           (list item (vector badge location desc ctx age author)))
       (list item (vector badge location desc ctx)))))
 
+(defun todo-explorer--restore-point (prev-item prev-line)
+  "Restore point after a display refresh.
+Try to find PREV-ITEM in the new display.  If gone, go to buffer
+line PREV-LINE (clamped to buffer end)."
+  (if (and prev-item
+           (let ((found nil))
+             (save-excursion
+               (goto-char (point-min))
+               (while (and (not found) (not (eobp)))
+                 (when (eq (tabulated-list-get-id) prev-item)
+                   (setq found (point)))
+                 (forward-line 1)))
+             (when found (goto-char found) t)))
+      nil  ; already moved to the matching item
+    (goto-char (point-min))
+    (forward-line (1- (min prev-line
+                           (count-lines (point-min) (point-max)))))))
+
 (defun todo-explorer--refresh-display ()
   "Populate the tabulated list from `todo-explorer--filtered-items'."
-  (todo-explorer--remove-context-overlays)
-  (todo-explorer--remove-file-headers)
-  (let ((entries (mapcar #'todo-explorer--make-entry
-                         todo-explorer--filtered-items)))
-    (when (eq todo-explorer--sort-mode 'file)
-      (dolist (entry entries)
-        (let* ((item (car entry))
-               (line-str (number-to-string (todo-explorer-item-line item)))
-               (short-loc (propertize line-str
-                                      'face 'todo-explorer-face-line-number)))
-          (aset (cadr entry) 1 short-loc))))
-    (setq tabulated-list-entries entries))
-  (tabulated-list-print t)
-  (goto-char (point-min))
-  (if (null tabulated-list-entries)
-      (let ((msg (if (or todo-explorer--active-filter
-                         todo-explorer--priority-filter
-                         todo-explorer--text-filter
-                         todo-explorer--file-filter
-                         todo-explorer--context-filter
-                         todo-explorer--author-filter)
-                     "No matching items. Press 'f a' to clear filters."
-                   "No TODO items found. Press 'g' to rescan or '?' for help.")))
-        (insert (propertize (concat "\n  " msg) 'face 'shadow)))
-    (todo-explorer--insert-file-group-headers)
-    (todo-explorer--restore-expansions)))
+  (let ((prev-item (todo-explorer--item-at-point))
+        (prev-line (line-number-at-pos)))
+    (todo-explorer--remove-context-overlays)
+    (todo-explorer--remove-file-headers)
+    (let ((entries (mapcar #'todo-explorer--make-entry
+                           todo-explorer--filtered-items)))
+      (when (eq todo-explorer--sort-mode 'file)
+        (dolist (entry entries)
+          (let* ((item (car entry))
+                 (line-str (number-to-string (todo-explorer-item-line item)))
+                 (short-loc (propertize line-str
+                                        'face 'todo-explorer-face-line-number)))
+            (aset (cadr entry) 1 short-loc))))
+      (setq tabulated-list-entries entries))
+    (tabulated-list-print t)
+    (if (null tabulated-list-entries)
+        (progn
+          (goto-char (point-min))
+          (let ((msg (if (or todo-explorer--active-filter
+                             todo-explorer--priority-filter
+                             todo-explorer--text-filter
+                             todo-explorer--file-filter
+                             todo-explorer--context-filter
+                             todo-explorer--author-filter)
+                         "No matching items. Press 'f a' to clear filters."
+                       "No TODO items found. Press 'g' to rescan or '?' for help.")))
+            (insert (propertize (concat "\n  " msg) 'face 'shadow))))
+      (todo-explorer--insert-file-group-headers)
+      (todo-explorer--restore-expansions)
+      (todo-explorer--restore-point prev-item prev-line))))
 
 (defun todo-explorer--keyword-counts (items)
   "Return an alist of (KEYWORD . COUNT) for ITEMS, sorted by priority."
