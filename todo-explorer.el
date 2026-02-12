@@ -1744,13 +1744,23 @@ Prompts with completion from directories containing scanned items."
   (interactive)
   (let ((root (todo-explorer--require-project-root)))
     (todo-explorer--ensure-ignore-list)
-    (let* ((dirs (delete-dups
-                  (mapcar (lambda (item)
-                            (file-name-directory
-                             (file-relative-name
-                              (todo-explorer-item-file item) root)))
-                          todo-explorer--items)))
-           (dir (completing-read "Ignore directory: " dirs nil nil)))
+    (let* ((leaf-dirs (delete-dups
+                       (delq nil
+                             (mapcar (lambda (item)
+                                       (file-name-directory
+                                        (file-relative-name
+                                         (todo-explorer-item-file item) root)))
+                                     todo-explorer--items))))
+           (all-dirs (delete-dups
+                      (cl-mapcan
+                       (lambda (d)
+                         (let ((parts nil) (acc ""))
+                           (dolist (seg (split-string d "/" t))
+                             (setq acc (concat acc seg "/"))
+                             (push acc parts))
+                           (nreverse parts)))
+                       leaf-dirs)))
+           (dir (completing-read "Ignore directory: " all-dirs nil nil)))
       (when (string-empty-p dir)
         (user-error "No directory specified"))
       (unless (string-suffix-p "/" dir)
